@@ -98,23 +98,47 @@ def translate_uz(text):
 
 
 def get_finviz_data(symbol):
-    """finvizfinance kutubxonasi orqali Short Float va 52W Range ni oladi (barqaror usul)"""
-    result = {"short_float": "N/A", "week_52_range": "N/A"}
+    """Finviz'dan to'g'ridan-to'g'ri HTML scraping orqali oladi.
+    finvizfinance kutubxonasi "52W Range"ni bitta maydon deb kutadi,
+    lekin Finviz saytida hozir bu "52W High" va "52W Low" deb ikkiga bo'lingan —
+    shu sababli kutubxona ishlamay qoladi. Shuning uchun qo'lda scraping qilamiz."""
+    result = {"short_float": "N/A", "week_52_range": "N/A", "week_52_high": "N/A", "week_52_low": "N/A"}
     try:
-        stock = finvizfinance(symbol)
-        data = stock.ticker_fundament()
+        import requests
+        from bs4 import BeautifulSoup
+
+        url = f"https://finviz.com/quote.ashx?t={symbol}"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return result
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        table = soup.find("table", class_="snapshot-table2")
+        if not table:
+            return result
+
+        cells = [c.get_text(strip=True) for c in table.find_all("td")]
+        data = {cells[i]: cells[i + 1] for i in range(0, len(cells) - 1, 2)}
 
         result["short_float"] = data.get("Short Float", "N/A")
 
-        # Kutubxona "52W Range"ni ikkiga bo'lib saqlaydi: "52W Range From" / "52W Range To"
-        low = data.get("52W Range From")
-        high = data.get("52W Range To")
-        if low and high:
-            result["week_52_range"] = f"{low} - {high}"
-        else:
-            result["week_52_range"] = data.get("52W Range", "N/A")
+        # "52W High"/"52W Low" qiymatlari "185.25 -98.92%" ko'rinishida keladi —
+        # raqam va foizni ikkalasini ham saqlaymiz
+        def parse_value_pct(text):
+            if not text:
+                return None
+            return text  # Finviz'dagidek aynan, o'zgartirmasdan
+
+        high = parse_value_pct(data.get("52W High"))
+        low = parse_value_pct(data.get("52W Low"))
+        result["week_52_high"] = high or "N/A"
+        result["week_52_low"] = low or "N/A"
+        if high and low:
+            result["week_52_range"] = f"{low} / {high}"
+
     except Exception:
         pass
+
     return result
 
 
@@ -333,7 +357,8 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💰 Market Cap: {fmt_num(info.get('marketCap'))}
 🏦 Float: {fmt_num(info.get('floatShares'))}
 📉 Short Float: {finviz_data['short_float']}
-📊 52W High/Low: {finviz_data['week_52_range']}
+📊 52W High: {finviz_data['week_52_high']}
+📊 52W Low: {finviz_data['week_52_low']}
 📊 Avg Volume: {fmt_num(avg_volume)}
 🔥 Current Volume: {fmt_num(current_volume)}
 📈 Relative Volume: {rvol}
@@ -428,12 +453,7 @@ async def dollar_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("$"):
         context.args = [text[1:]]
         await news(update, context)
-
-
-async def hashtag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().upper()
-
-    if text.startswith("#"):
+    elif text.startswith("#"):
         context.args = [text[1:]]
         await ticker(update, context)
 
@@ -446,7 +466,6 @@ def main():
     app.add_handler(CommandHandler("news", news))
     app.add_handler(CommandHandler("debugfinviz", debugfinviz))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dollar_news))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, hashtag))
 
     print("Bot ishga tushdi...")
     app.run_polling()
