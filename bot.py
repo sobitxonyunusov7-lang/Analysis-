@@ -7,11 +7,17 @@ from telegram.ext import (
     filters,
 )
 import os
+import socket
 import yfinance as yf
 import feedparser
 from datetime import datetime
 from finvizfinance.quote import finvizfinance
 from deep_translator import GoogleTranslator
+
+# MUHIM: hech qanday tarmoq so'rovi cheksiz osilib qolmasligi uchun global timeout.
+# Buning yo'qligi butun botni "muzlatib" qo'yishi mumkin edi (bitta foydalanuvchi
+# uchun sekin javob butun botni barcha userlar uchun to'xtatib qo'yardi).
+socket.setdefaulttimeout(12)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
