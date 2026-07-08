@@ -2,6 +2,8 @@ name: Stock Analysis Bot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"   # Har 30 daqiqada
 
 jobs:
   run:
