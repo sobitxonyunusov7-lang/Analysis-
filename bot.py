@@ -8,6 +8,7 @@ from telegram.ext import (
 )
 import os
 import socket
+import asyncio
 import yfinance as yf
 import feedparser
 from datetime import datetime
@@ -290,6 +291,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def run_blocking(func, *args, timeout=10, default=None, **kwargs):
+    """Har qanday bloklovchi (sinxron) funksiyani alohida oqimda (thread) ishga tushiradi,
+    qat'iy vaqt chegarasi bilan. Shu orqali bitta sekin so'rov butun botni
+    (barcha foydalanuvchilar uchun) muzlatib qo'yishining oldi olinadi."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(func, *args, **kwargs), timeout=timeout)
+    except Exception:
+        return default
+
+
+def fetch_yfinance_data(symbol):
+    """yfinance orqali barcha kerakli ma'lumotlarni bitta chaqiruvda yig'adi
+    (bir nechta alohida yf.Ticker so'rovlarini kamaytirish uchun)"""
+    stock = yf.Ticker(symbol)
+    info = stock.info
+
+    earnings = info.get("earningsTimestamp")
+    if earnings:
+        earnings_str = datetime.fromtimestamp(earnings).strftime("%Y-%m-%d")
+    else:
+        earnings_str = "N/A"
+        try:
+            cal = stock.calendar
+            earn_date = None
+            if isinstance(cal, dict):
+                earn_date = cal.get("Earnings Date")
+            if earn_date:
+                if isinstance(earn_date, (list, tuple)):
+                    earn_date = earn_date[0]
+                earnings_str = str(earn_date)
+        except Exception:
+            pass
+
+    flags, events = get_news_flags_and_events(stock, translate=False)
+
+    return {"info": info, "earnings": earnings_str, "flags": flags, "events": events}
+
+
 async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Misol:\n#BIYA\nyoki\n/ticker BIYA")
@@ -298,37 +337,37 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     await update.message.reply_text(f"⏳ {symbol} tekshirilyapti...")
 
+    default_flags = {key: False for key in RISK_KEYWORDS}
+    default_finviz = {"short_float": "N/A", "week_52_range": "N/A", "week_52_high": "N/A", "week_52_low": "N/A"}
+
+    # Barcha tarmoq so'rovlarini PARALLEL, har biriga alohida vaqt chegarasi bilan yuboramiz.
+    # Shunday qilib, masalan Finviz osilib qolsa ham, u faqat o'zining bo'limini
+    # "N/A" qilib qoldiradi — butun bot yoki boshqa maydonlarni to'xtatib qo'ymaydi.
+    yf_task = run_blocking(
+        fetch_yfinance_data, symbol, timeout=15,
+        default={"info": {}, "earnings": "N/A", "flags": default_flags, "events": []},
+    )
+    finviz_task = run_blocking(get_finviz_data, symbol, timeout=8, default=default_finviz)
+    stocktitan_news_task = run_blocking(
+        get_stocktitan_news, symbol, timeout=8, default=[], limit=5, translate=False
+    )
+    sec_task = run_blocking(
+        lambda: get_stocktitan_sec_filings(symbol) or get_sec_filings_rss(symbol),
+        timeout=10, default="Topilmadi",
+    )
+
+    yf_result, finviz_data, stocktitan_events, sec_filings_text = await asyncio.gather(
+        yf_task, finviz_task, stocktitan_news_task, sec_task
+    )
+
     try:
-        stock = yf.Ticker(symbol)
-        info = stock.info
+        info = yf_result["info"]
+        earnings = yf_result["earnings"]
+        flags = dict(yf_result["flags"])
 
         avg_volume = info.get("averageVolume", 0)
         current_volume = info.get("volume", 0)
         rvol = round(current_volume / avg_volume, 2) if avg_volume else "N/A"
-
-        earnings = info.get("earningsTimestamp")
-        if earnings:
-            earnings = datetime.fromtimestamp(earnings).strftime("%Y-%m-%d")
-        else:
-            # Zaxira variant: yfinance'ning calendar ma'lumotidan olish
-            earnings = "N/A"
-            try:
-                cal = stock.calendar
-                earn_date = None
-                if isinstance(cal, dict):
-                    earn_date = cal.get("Earnings Date")
-                if earn_date:
-                    if isinstance(earn_date, (list, tuple)):
-                        earn_date = earn_date[0]
-                    earnings = str(earn_date)
-            except Exception:
-                pass
-
-        finviz_data = get_finviz_data(symbol)
-        flags, events = get_news_flags_and_events(stock, translate=False)
-
-        # StockTitan'dan qo'shimcha yangiliklar (ayniqsa kichik/penny stocklar uchun foydali)
-        stocktitan_events = get_stocktitan_news(symbol, limit=5, translate=False)
 
         # StockTitan yangiliklarida ham xavf so'zlarini tekshiramiz
         for e in stocktitan_events:
@@ -357,8 +396,6 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             overall_risk = "🟡 O'rta"
         else:
             overall_risk = "🟢 Past"
-
-        sec_filings_text = get_stocktitan_sec_filings(symbol) or get_sec_filings_rss(symbol)
 
         msg = f"""📊 {symbol}
 
@@ -412,13 +449,19 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     await update.message.reply_text(f"⏳ {symbol} yangiliklari qidirilyapti...")
 
-    try:
-        stock = yf.Ticker(symbol)
-
-        stocktitan_events = get_stocktitan_news(symbol, limit=5, translate=True)
+    def fetch_yahoo_news(sym):
+        stock = yf.Ticker(sym)
         _, yahoo_events = get_news_flags_and_events(stock, translate=True)
+        return yahoo_events
 
-        msg = f"""📰 {symbol} — Yangiliklar
+    stocktitan_task = run_blocking(
+        get_stocktitan_news, symbol, timeout=10, default=[], limit=5, translate=True
+    )
+    yahoo_task = run_blocking(fetch_yahoo_news, symbol, timeout=15, default=[])
+
+    stocktitan_events, yahoo_events = await asyncio.gather(stocktitan_task, yahoo_task)
+
+    msg = f"""📰 {symbol} — Yangiliklar
 
 📰 StockTitan:
 {format_events(stocktitan_events)}
@@ -426,10 +469,7 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📰 Yahoo Finance:
 {format_events(yahoo_events)}
 """
-        await update.message.reply_text(msg)
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
+    await update.message.reply_text(msg)
 
 
 async def debugfinviz(update: Update, context: ContextTypes.DEFAULT_TYPE):
