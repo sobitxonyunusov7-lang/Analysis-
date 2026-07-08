@@ -97,48 +97,52 @@ def translate_uz(text):
         return text
 
 
-def get_finviz_data(symbol):
-    """Finviz'dan to'g'ridan-to'g'ri HTML scraping orqali oladi.
-    finvizfinance kutubxonasi "52W Range"ni bitta maydon deb kutadi,
-    lekin Finviz saytida hozir bu "52W High" va "52W Low" deb ikkiga bo'lingan —
-    shu sababli kutubxona ishlamay qoladi. Shuning uchun qo'lda scraping qilamiz."""
+def get_finviz_data(symbol, debug=False):
+    """Finviz'dan to'g'ridan-to'g'ri HTML scraping orqali oladi."""
     result = {"short_float": "N/A", "week_52_range": "N/A", "week_52_high": "N/A", "week_52_low": "N/A"}
+    diag = {}
     try:
         import requests
         from bs4 import BeautifulSoup
 
         url = f"https://finviz.com/quote.ashx?t={symbol}"
         resp = requests.get(url, headers=HEADERS, timeout=10)
+        diag["status_code"] = resp.status_code
+        diag["response_length"] = len(resp.text)
+
         if resp.status_code != 200:
+            if debug:
+                result["_debug"] = diag
             return result
 
         soup = BeautifulSoup(resp.text, "lxml")
         table = soup.find("table", class_="snapshot-table2")
+        diag["table_found"] = table is not None
+
         if not table:
+            diag["page_title"] = soup.title.text if soup.title else "N/A"
+            if debug:
+                result["_debug"] = diag
             return result
 
         cells = [c.get_text(strip=True) for c in table.find_all("td")]
         data = {cells[i]: cells[i + 1] for i in range(0, len(cells) - 1, 2)}
+        diag["keys_found"] = list(data.keys())
 
         result["short_float"] = data.get("Short Float", "N/A")
 
-        # "52W High"/"52W Low" qiymatlari "185.25 -98.92%" ko'rinishida keladi —
-        # raqam va foizni ikkalasini ham saqlaymiz
-        def parse_value_pct(text):
-            if not text:
-                return None
-            return text  # Finviz'dagidek aynan, o'zgartirmasdan
-
-        high = parse_value_pct(data.get("52W High"))
-        low = parse_value_pct(data.get("52W Low"))
+        high = data.get("52W High") or None
+        low = data.get("52W Low") or None
         result["week_52_high"] = high or "N/A"
         result["week_52_low"] = low or "N/A"
         if high and low:
             result["week_52_range"] = f"{low} / {high}"
 
-    except Exception:
-        pass
+    except Exception as e:
+        diag["exception"] = str(e)
 
+    if debug:
+        result["_debug"] = diag
     return result
 
 
@@ -423,28 +427,27 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def debugfinviz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Vaqtinchalik: Finviz'dan qaytgan barcha xom kalit-qiymatlarni ko'rsatadi (debug uchun)"""
+    """Vaqtinchalik: Finviz scrapingning aynan qayerda muvaffaqiyatsiz bo'layotganini ko'rsatadi"""
     if not context.args:
         await update.message.reply_text("Misol:\n/debugfinviz DAIC")
         return
 
     symbol = context.args[0].upper()
-    try:
-        stock = finvizfinance(symbol)
-        data = stock.ticker_fundament()
+    result = get_finviz_data(symbol, debug=True)
+    diag = result.pop("_debug", {})
 
-        # Short/52W/Float bilan bog'liq bo'lishi mumkin bo'lgan kalitlarni ajratib ko'rsatamiz
-        relevant = {k: v for k, v in data.items() if any(
-            key_part in k for key_part in ["Short", "52W", "Float", "Volume", "Volatility"]
-        )}
+    lines = ["🔍 Natija:"]
+    for k, v in result.items():
+        lines.append(f"{k}: {v}")
 
-        lines = [f"{k}: {v}" for k, v in relevant.items()]
-        text = "🔍 Tegishli maydonlar:\n" + "\n".join(lines) if lines else "Hech narsa topilmadi"
-        text += f"\n\nJami kalitlar soni: {len(data)}"
+    lines.append("\n🛠 Diagnostika:")
+    for k, v in diag.items():
+        if k == "keys_found":
+            lines.append(f"{k}: {len(v)} ta kalit topildi")
+        else:
+            lines.append(f"{k}: {v}")
 
-        await update.message.reply_text(text)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Xato: {e}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def dollar_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
