@@ -20,6 +20,39 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
 
+# SEC data.sec.gov / www.sec.gov so'rovlari uchun: SEC "fair access" siyosatiga ko'ra
+# User-Agent'da ilova nomi + aloqa email bo'lishi kerak, aks holda 403 qaytarishi mumkin.
+SEC_HEADERS = {
+    "User-Agent": "StockAnalyzerBot (contact: your-email@example.com)"
+}
+
+_CIK_MAP_CACHE = None
+
+
+def _load_cik_map():
+    """SEC'ning rasmiy ticker -> CIK xaritasini yuklab, keshda saqlaydi"""
+    global _CIK_MAP_CACHE
+    if _CIK_MAP_CACHE is not None:
+        return _CIK_MAP_CACHE
+
+    import requests as _requests
+    try:
+        resp = _requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=SEC_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        _CIK_MAP_CACHE = {
+            v["ticker"].upper(): str(v["cik_str"]).zfill(10) for v in raw.values()
+        }
+    except Exception:
+        _CIK_MAP_CACHE = {}
+
+    return _CIK_MAP_CACHE
+
+
 RISK_KEYWORDS = {
     "delisting": ["delisting", "delist", "noncompliance", "non-compliance", "minimum bid"],
     "reverse_split": ["reverse split", "reverse stock split"],
@@ -70,21 +103,43 @@ def get_finviz_data(symbol):
     try:
         stock = finvizfinance(symbol)
         data = stock.ticker_fundament()
+
         result["short_float"] = data.get("Short Float", "N/A")
-        result["week_52_range"] = data.get("52W Range", "N/A")
+
+        # Kutubxona "52W Range"ni ikkiga bo'lib saqlaydi: "52W Range From" / "52W Range To"
+        low = data.get("52W Range From")
+        high = data.get("52W Range To")
+        if low and high:
+            result["week_52_range"] = f"{low} - {high}"
+        else:
+            result["week_52_range"] = data.get("52W Range", "N/A")
     except Exception:
         pass
     return result
 
 
 def get_sec_filings_rss(symbol, limit=6):
+    """Avval ticker->CIK xaritasidan CIK topib, keyin shu CIK bo'yicha rasmiy Atom feedni o'qiydi.
+    Bu company nomi bo'yicha qidirishdan ancha ishonchli."""
     try:
-        url = (
-            "https://www.sec.gov/cgi-bin/browse-edgar"
-            f"?action=getcompany&company={symbol}&type=&dateb=&owner=include"
-            f"&count={limit}&output=atom"
-        )
-        feed = feedparser.parse(url, request_headers=HEADERS)
+        cik_map = _load_cik_map()
+        cik = cik_map.get(symbol.upper())
+
+        if cik:
+            url = (
+                "https://www.sec.gov/cgi-bin/browse-edgar"
+                f"?action=getcompany&CIK={cik}&type=&dateb=&owner=include"
+                f"&count={limit}&output=atom"
+            )
+        else:
+            # Zaxira variant: kompaniya nomi bo'yicha qidirish
+            url = (
+                "https://www.sec.gov/cgi-bin/browse-edgar"
+                f"?action=getcompany&company={symbol}&type=&dateb=&owner=include"
+                f"&count={limit}&output=atom"
+            )
+
+        feed = feedparser.parse(url, request_headers=SEC_HEADERS)
         if not feed.entries:
             return "Topilmadi"
 
@@ -153,9 +208,22 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rvol = round(current_volume / avg_volume, 2) if avg_volume else "N/A"
 
         earnings = info.get("earningsTimestamp")
-        earnings = (
-            datetime.fromtimestamp(earnings).strftime("%Y-%m-%d") if earnings else "N/A"
-        )
+        if earnings:
+            earnings = datetime.fromtimestamp(earnings).strftime("%Y-%m-%d")
+        else:
+            # Zaxira variant: yfinance'ning calendar ma'lumotidan olish
+            earnings = "N/A"
+            try:
+                cal = stock.calendar
+                earn_date = None
+                if isinstance(cal, dict):
+                    earn_date = cal.get("Earnings Date")
+                if earn_date:
+                    if isinstance(earn_date, (list, tuple)):
+                        earn_date = earn_date[0]
+                    earnings = str(earn_date)
+            except Exception:
+                pass
 
         finviz_data = get_finviz_data(symbol)
         flags, events = get_news_flags_and_events(stock, translate=True)
