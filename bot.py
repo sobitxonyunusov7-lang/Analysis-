@@ -441,6 +441,37 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {e}")
 
 
+async def debugyf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vaqtinchalik: yfinance nima qaytarayotganini yoki qanday xato berayotganini ko'rsatadi"""
+    if not context.args:
+        await update.message.reply_text("Misol:\n/debugyf VRXA")
+        return
+
+    symbol = context.args[0].upper()
+
+    def _debug_fetch(sym):
+        result = {}
+        try:
+            stock = yf.Ticker(sym)
+            info = stock.info
+            result["info_keys_count"] = len(info) if info else 0
+            result["has_price"] = "currentPrice" in info if info else False
+            result["sample"] = {
+                k: info.get(k) for k in ["shortName", "symbol", "currentPrice", "regularMarketPrice", "quoteType"]
+            } if info else {}
+        except Exception as e:
+            result["exception"] = f"{type(e).__name__}: {e}"
+        return result
+
+    result = await run_blocking(_debug_fetch, symbol, timeout=15, default={"exception": "Timeout (15s)"})
+
+    lines = ["🔍 yfinance diagnostikasi:"]
+    for k, v in result.items():
+        lines.append(f"{k}: {v}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Misol:\n/news DAIC")
@@ -514,6 +545,7 @@ def main():
     app.add_handler(CommandHandler("ticker", ticker))
     app.add_handler(CommandHandler("news", news))
     app.add_handler(CommandHandler("debugfinviz", debugfinviz))
+    app.add_handler(CommandHandler("debugyf", debugyf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dollar_news))
 
     print("Bot ishga tushdi...")
