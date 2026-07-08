@@ -397,6 +397,39 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {e}")
 
 
+async def debugfinviz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vaqtinchalik: Finviz'dan qaytgan barcha xom kalit-qiymatlarni ko'rsatadi (debug uchun)"""
+    if not context.args:
+        await update.message.reply_text("Misol:\n/debugfinviz DAIC")
+        return
+
+    symbol = context.args[0].upper()
+    try:
+        stock = finvizfinance(symbol)
+        data = stock.ticker_fundament()
+
+        # Short/52W/Float bilan bog'liq bo'lishi mumkin bo'lgan kalitlarni ajratib ko'rsatamiz
+        relevant = {k: v for k, v in data.items() if any(
+            key_part in k for key_part in ["Short", "52W", "Float", "Volume", "Volatility"]
+        )}
+
+        lines = [f"{k}: {v}" for k, v in relevant.items()]
+        text = "🔍 Tegishli maydonlar:\n" + "\n".join(lines) if lines else "Hech narsa topilmadi"
+        text += f"\n\nJami kalitlar soni: {len(data)}"
+
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Xato: {e}")
+
+
+async def dollar_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().upper()
+
+    if text.startswith("$"):
+        context.args = [text[1:]]
+        await news(update, context)
+
+
 async def hashtag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().upper()
 
@@ -411,6 +444,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ticker", ticker))
     app.add_handler(CommandHandler("news", news))
+    app.add_handler(CommandHandler("debugfinviz", debugfinviz))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dollar_news))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, hashtag))
 
     print("Bot ishga tushdi...")
