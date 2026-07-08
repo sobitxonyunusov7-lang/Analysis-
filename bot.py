@@ -193,6 +193,20 @@ def get_sec_filings_rss(symbol, limit=6):
         return "Topilmadi"
 
 
+def format_events(items, empty_text="• Ma'lumot topilmadi"):
+    if not items:
+        return empty_text
+    lines = []
+    for e in items:
+        line = f"• {e['title']}"
+        if e.get("publisher"):
+            line += f" ({e['publisher']})"
+        if e.get("link"):
+            line += f"\n  🔗 {e['link']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def get_news_flags_and_events(stock, translate=True):
     flags = {key: False for key in RISK_KEYWORDS}
     events = []
@@ -233,10 +247,12 @@ def get_news_flags_and_events(stock, translate=True):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📊 Stock Analysis Bot\n\n"
-        "Ticker yuborish:\n"
+        "Ticker ma'lumotlari uchun:\n"
         "#BIYA\n"
         "yoki\n"
-        "/ticker BIYA"
+        "/ticker BIYA\n\n"
+        "Faqat yangiliklar uchun:\n"
+        "/news BIYA"
     )
 
 
@@ -275,10 +291,10 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
         finviz_data = get_finviz_data(symbol)
-        flags, events = get_news_flags_and_events(stock, translate=True)
+        flags, events = get_news_flags_and_events(stock, translate=False)
 
         # StockTitan'dan qo'shimcha yangiliklar (ayniqsa kichik/penny stocklar uchun foydali)
-        stocktitan_events = get_stocktitan_news(symbol, limit=5, translate=True)
+        stocktitan_events = get_stocktitan_news(symbol, limit=5, translate=False)
 
         # StockTitan yangiliklarida ham xavf so'zlarini tekshiramiz
         for e in stocktitan_events:
@@ -308,21 +324,6 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             overall_risk = "🟢 Past"
 
-        def format_events(items, empty_text="• Ma'lumot topilmadi"):
-            if not items:
-                return empty_text
-            lines = []
-            for e in items:
-                line = f"• {e['title']}"
-                if e.get("publisher"):
-                    line += f" ({e['publisher']})"
-                if e.get("link"):
-                    line += f"\n  🔗 {e['link']}"
-                lines.append(line)
-            return "\n".join(lines)
-
-        stocktitan_text = format_events(stocktitan_events)
-        yahoo_text = format_events(events)
         sec_filings_text = get_stocktitan_sec_filings(symbol) or get_sec_filings_rss(symbol)
 
         msg = f"""📊 {symbol}
@@ -351,12 +352,6 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👥 Employees: {info.get('fullTimeEmployees', 'N/A')}
 🏢 Exchange: {info.get('exchange', 'N/A')}
 
-📰 StockTitan yangiliklari:
-{stocktitan_text}
-
-📰 Boshqa yangiliklar (Yahoo Finance):
-{yahoo_text}
-
 📂 SEC Filings:
 {sec_filings_text}
 
@@ -368,6 +363,34 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⭐ Risk: {overall_risk}
 """
 
+        await update.message.reply_text(msg)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+
+
+async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Misol:\n/news DAIC")
+        return
+
+    symbol = context.args[0].upper()
+    await update.message.reply_text(f"⏳ {symbol} yangiliklari qidirilyapti...")
+
+    try:
+        stock = yf.Ticker(symbol)
+
+        stocktitan_events = get_stocktitan_news(symbol, limit=5, translate=True)
+        _, yahoo_events = get_news_flags_and_events(stock, translate=True)
+
+        msg = f"""📰 {symbol} — Yangiliklar
+
+📰 StockTitan:
+{format_events(stocktitan_events)}
+
+📰 Yahoo Finance:
+{format_events(yahoo_events)}
+"""
         await update.message.reply_text(msg)
 
     except Exception as e:
@@ -387,6 +410,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ticker", ticker))
+    app.add_handler(CommandHandler("news", news))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, hashtag))
 
     print("Bot ishga tushdi...")
