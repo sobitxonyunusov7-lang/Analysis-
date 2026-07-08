@@ -176,7 +176,17 @@ def get_news_flags_and_events(stock, translate=True):
 
         if len(events) < 5:
             display_title = translate_uz(title) if translate else title
-            events.append(display_title)
+
+            # Havolani turli mumkin bo'lgan joylardan qidiramiz
+            link = (
+                (content.get("canonicalUrl") or {}).get("url")
+                or (content.get("clickThroughUrl") or {}).get("url")
+                or item.get("link")
+                or ""
+            )
+            publisher = (content.get("provider") or {}).get("displayName", "")
+
+            events.append({"title": display_title, "link": link, "publisher": publisher})
 
     return flags, events
 
@@ -249,7 +259,18 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             overall_risk = "🟢 Past"
 
-        events_text = "\n".join(f"• {e}" for e in events) if events else "• Ma'lumot topilmadi"
+        if events:
+            lines = []
+            for e in events:
+                line = f"• {e['title']}"
+                if e.get("publisher"):
+                    line += f" ({e['publisher']})"
+                if e.get("link"):
+                    line += f"\n  🔗 {e['link']}"
+                lines.append(line)
+            events_text = "\n".join(lines)
+        else:
+            events_text = "• Ma'lumot topilmadi"
         sec_filings_text = get_sec_filings_rss(symbol)
 
         msg = f"""📊 {symbol}
