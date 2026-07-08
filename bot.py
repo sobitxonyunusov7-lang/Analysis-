@@ -104,6 +104,53 @@ def translate_uz(text):
         return text
 
 
+def get_iborrowdesk_data(symbol):
+    """iborrowdesk.com'ning hujjatlashtirilmagan, lekin ochiq JSON endpointidan
+    Interactive Brokers'ning Borrow Fee va Shares Available ma'lumotlarini oladi."""
+    result = {"borrow_fee": None, "shares_available": None}
+    try:
+        url = f"https://iborrowdesk.com/api/ticker/{symbol}"
+        resp = _requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return result
+
+        data = resp.json()
+        daily = data.get("daily") or []
+        if not daily:
+            return result
+
+        latest = daily[-1]
+        result["borrow_fee"] = latest.get("fee")
+        result["shares_available"] = latest.get("available")
+    except Exception:
+        pass
+
+    return result
+
+
+def calculate_squeeze_score(short_float_pct, borrow_fee_pct, shares_available, float_shares):
+    """ODDIY, TAXMINIY (heuristic) short-squeeze bali — Ortex/Fintel kabi
+    pullik xizmatlarning maxfiy formulasi EMAS. Faqat mavjud ochiq
+    ko'rsatkichlar asosida qo'pol baholash uchun."""
+    score = 0
+
+    # Short Float qancha yuqori bo'lsa, shuncha ko'p ball (max 40)
+    if short_float_pct is not None:
+        score += min(short_float_pct / 30 * 40, 40)
+
+    # Borrow Fee qancha yuqori bo'lsa, shuncha ko'p ball (max 35) —
+    # yuqori fee odatda kam qolgan aksiya borligini bildiradi
+    if borrow_fee_pct is not None:
+        score += min(borrow_fee_pct / 50 * 35, 35)
+
+    # Available shares float'ga nisbatan qancha kam bo'lsa, shuncha ko'p ball (max 25)
+    if shares_available is not None and float_shares:
+        ratio = shares_available / float_shares
+        score += max(0, 25 * (1 - min(ratio / 0.05, 1)))
+
+    return round(min(score, 100))
+
+
 def get_finviz_data(symbol, debug=False):
     """Finviz'dan to'g'ridan-to'g'ri HTML scraping orqali oladi."""
     result = {"short_float": "N/A", "week_52_range": "N/A", "week_52_high": "N/A", "week_52_low": "N/A"}
@@ -287,7 +334,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "yoki\n"
         "/ticker BIYA\n\n"
         "Faqat yangiliklar uchun:\n"
-        "/news BIYA"
+        "$BIYA yoki /news BIYA\n\n"
+        "Short/Squeeze ma'lumotlari uchun:\n"
+        "*BIYA yoki /short BIYA"
     )
 
 
@@ -299,6 +348,33 @@ async def run_blocking(func, *args, timeout=10, default=None, **kwargs):
         return await asyncio.wait_for(asyncio.to_thread(func, *args, **kwargs), timeout=timeout)
     except Exception:
         return default
+
+
+import requests as _requests
+from requests.adapters import HTTPAdapter
+
+
+class _TimeoutHTTPAdapter(HTTPAdapter):
+    """Har bir so'rovga aniq timeout majburlaydigan adapter — agar chaqiruvchi
+    timeout ko'rsatmasa ham, bu qiymat ishlatiladi. Shu orqali yfinance kabi
+    kutubxonalar ham hech qachon cheksiz osilib qolmaydi."""
+
+    def __init__(self, *args, timeout=15, **kwargs):
+        self.timeout = timeout
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self.timeout
+        return super().send(request, **kwargs)
+
+
+def make_timeout_session(timeout=15):
+    session = _requests.Session()
+    adapter = _TimeoutHTTPAdapter(timeout=timeout)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 def fetch_yfinance_data(symbol):
@@ -472,6 +548,64 @@ async def debugyf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def shortinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Misol:\n*BIYA\nyoki\n/short BIYA")
+        return
+
+    symbol = context.args[0].upper()
+    await update.message.reply_text(f"⏳ {symbol} short ma'lumotlari qidirilyapti...")
+
+    def _fetch_all(sym):
+        finviz = get_finviz_data(sym)
+        borrow = get_iborrowdesk_data(sym)
+        try:
+            info = yf.Ticker(sym).info
+        except Exception:
+            info = {}
+        return finviz, borrow, info
+
+    finviz_data, borrow_data, info = await run_blocking(
+        _fetch_all, symbol, timeout=15,
+        default=(
+            {"short_float": "N/A"},
+            {"borrow_fee": None, "shares_available": None},
+            {},
+        ),
+    )
+
+    # Short Float'ni foizga (raqamga) aylantirishga urinamiz, score hisoblash uchun
+    short_float_num = None
+    try:
+        sf = finviz_data.get("short_float", "")
+        if sf and sf != "N/A":
+            short_float_num = float(str(sf).replace("%", "").strip())
+    except (ValueError, TypeError):
+        pass
+
+    float_shares = info.get("floatShares")
+    borrow_fee = borrow_data.get("borrow_fee")
+    shares_available = borrow_data.get("shares_available")
+
+    score = calculate_squeeze_score(short_float_num, borrow_fee, shares_available, float_shares)
+
+    def fmt_or_na(val, suffix=""):
+        return f"{val}{suffix}" if val is not None else "N/A"
+
+    msg = f"""📊 {symbol} — Short / Squeeze ma'lumotlari
+
+📉 Short Interest (Float): {finviz_data.get('short_float', 'N/A')}
+💰 Borrow Fee: {fmt_or_na(borrow_fee, '%')}
+📦 Shares Available: {fmt_or_na(shares_available)}
+🔥 Short Squeeze Score (taxminiy): {score}/100
+
+⚠️ Eslatma: Squeeze Score — bu Ortex/Fintel kabi pullik xizmatlarning rasmiy
+formulasi emas, faqat ochiq ma'lumotlar (Short Float, Borrow Fee, mavjud
+aksiyalar) asosida hisoblangan oddiy, taxminiy ko'rsatkich.
+"""
+    await update.message.reply_text(msg)
+
+
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Misol:\n/news DAIC")
@@ -533,6 +667,9 @@ async def dollar_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("$"):
         context.args = [text[1:]]
         await news(update, context)
+    elif text.startswith("*"):
+        context.args = [text[1:]]
+        await shortinfo(update, context)
     elif text.startswith("#"):
         context.args = [text[1:]]
         await ticker(update, context)
@@ -546,6 +683,7 @@ def main():
     app.add_handler(CommandHandler("news", news))
     app.add_handler(CommandHandler("debugfinviz", debugfinviz))
     app.add_handler(CommandHandler("debugyf", debugyf))
+    app.add_handler(CommandHandler("short", shortinfo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dollar_news))
 
     print("Bot ishga tushdi...")
