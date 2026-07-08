@@ -8,11 +8,18 @@ from telegram.ext import (
 )
 import os
 import yfinance as yf
+import feedparser
 from datetime import datetime
+from finvizfinance.quote import finvizfinance
+from deep_translator import GoogleTranslator
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Xavf so'zlari — yangiliklar sarlavhalarida qidiriladi
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+}
+
 RISK_KEYWORDS = {
     "delisting": ["delisting", "delist", "noncompliance", "non-compliance", "minimum bid"],
     "reverse_split": ["reverse split", "reverse stock split"],
@@ -23,7 +30,6 @@ RISK_KEYWORDS = {
 
 
 def fmt_num(value, suffix=""):
-    """Katta sonlarni chiroyli formatlash (masalan 7277056 -> 7.28M)"""
     if value in (None, "N/A"):
         return "N/A"
     try:
@@ -48,8 +54,52 @@ def fmt_pct(value):
         return "N/A"
 
 
-def get_news_flags_and_events(stock):
-    """Yangiliklarni skanerlab, xavf bayroqlari va so'nggi voqealar ro'yxatini qaytaradi"""
+def translate_uz(text):
+    """Matnni o'zbekchaga tarjima qiladi, xato bo'lsa original matnni qaytaradi"""
+    if not text:
+        return text
+    try:
+        return GoogleTranslator(source="auto", target="uz").translate(text)
+    except Exception:
+        return text
+
+
+def get_finviz_data(symbol):
+    """finvizfinance kutubxonasi orqali Short Float va 52W Range ni oladi (barqaror usul)"""
+    result = {"short_float": "N/A", "week_52_range": "N/A"}
+    try:
+        stock = finvizfinance(symbol)
+        data = stock.ticker_fundament()
+        result["short_float"] = data.get("Short Float", "N/A")
+        result["week_52_range"] = data.get("52W Range", "N/A")
+    except Exception:
+        pass
+    return result
+
+
+def get_sec_filings_rss(symbol, limit=6):
+    try:
+        url = (
+            "https://www.sec.gov/cgi-bin/browse-edgar"
+            f"?action=getcompany&company={symbol}&type=&dateb=&owner=include"
+            f"&count={limit}&output=atom"
+        )
+        feed = feedparser.parse(url, request_headers=HEADERS)
+        if not feed.entries:
+            return "Topilmadi"
+
+        lines = []
+        for entry in feed.entries[:limit]:
+            title = entry.get("title", "N/A")
+            updated = entry.get("updated", "")[:10]
+            lines.append(f"• {title} ({updated})")
+
+        return "\n".join(lines)
+    except Exception:
+        return "Topilmadi"
+
+
+def get_news_flags_and_events(stock, translate=True):
     flags = {key: False for key in RISK_KEYWORDS}
     events = []
 
@@ -59,7 +109,6 @@ def get_news_flags_and_events(stock):
         news_items = []
 
     for item in news_items[:15]:
-        # yfinance versiyalariga qarab strukturasi farq qilishi mumkin
         content = item.get("content", item)
         title = (content.get("title") or "").strip()
         if not title:
@@ -71,28 +120,10 @@ def get_news_flags_and_events(stock):
                 flags[key] = True
 
         if len(events) < 5:
-            events.append(title)
+            display_title = translate_uz(title) if translate else title
+            events.append(display_title)
 
     return flags, events
-
-
-def get_sec_filings(stock):
-    """Eng so'nggi SEC filinglarni turlari bo'yicha qaytaradi"""
-    try:
-        filings = stock.sec_filings
-    except Exception:
-        filings = None
-
-    if not filings:
-        return "Topilmadi"
-
-    lines = []
-    for f in filings[:8]:
-        ftype = f.get("type", "N/A")
-        date = f.get("date", "")
-        lines.append(f"• {ftype} ({date})")
-
-    return "\n".join(lines) if lines else "Topilmadi"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,25 +150,19 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         avg_volume = info.get("averageVolume", 0)
         current_volume = info.get("volume", 0)
-
-        if avg_volume:
-            rvol = round(current_volume / avg_volume, 2)
-        else:
-            rvol = "N/A"
+        rvol = round(current_volume / avg_volume, 2) if avg_volume else "N/A"
 
         earnings = info.get("earningsTimestamp")
-        if earnings:
-            earnings = datetime.fromtimestamp(earnings).strftime("%Y-%m-%d")
-        else:
-            earnings = "N/A"
+        earnings = (
+            datetime.fromtimestamp(earnings).strftime("%Y-%m-%d") if earnings else "N/A"
+        )
 
-        # --- Xavf bayroqlari va yangiliklar ---
-        flags, events = get_news_flags_and_events(stock)
+        finviz_data = get_finviz_data(symbol)
+        flags, events = get_news_flags_and_events(stock, translate=True)
 
         def flag_icon(key):
             return "🔴 Bor" if flags[key] else "🟢 Yo'q"
 
-        # Dilution risk — bir nechta belgiga qarab baholash
         dilution_score = sum([
             flags["offering"], flags["dilution"], flags["reverse_split"], flags["delisting"]
         ])
@@ -148,7 +173,6 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             dilution_risk = "🟢 Past"
 
-        # --- Umumiy risk ---
         market_cap = info.get("marketCap") or 0
         if dilution_score >= 2 or (market_cap and market_cap < 50_000_000):
             overall_risk = "🔴 Yuqori"
@@ -158,7 +182,7 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             overall_risk = "🟢 Past"
 
         events_text = "\n".join(f"• {e}" for e in events) if events else "• Ma'lumot topilmadi"
-        sec_filings_text = get_sec_filings(stock)
+        sec_filings_text = get_sec_filings_rss(symbol)
 
         msg = f"""📊 {symbol}
 
@@ -166,6 +190,8 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📈 Change: {info.get('regularMarketChangePercent', 'N/A')}%
 💰 Market Cap: {fmt_num(info.get('marketCap'))}
 🏦 Float: {fmt_num(info.get('floatShares'))}
+📉 Short Float: {finviz_data['short_float']}
+📊 52W High/Low: {finviz_data['week_52_range']}
 📊 Avg Volume: {fmt_num(avg_volume)}
 🔥 Current Volume: {fmt_num(current_volume)}
 📈 Relative Volume: {rvol}
