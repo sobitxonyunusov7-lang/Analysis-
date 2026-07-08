@@ -118,6 +118,45 @@ def get_finviz_data(symbol):
     return result
 
 
+def get_stocktitan_news(symbol, limit=5, translate=True):
+    """StockTitan'ning rasmiy per-ticker RSS feedidan yangiliklarni oladi"""
+    events = []
+    try:
+        url = f"https://www.stocktitan.net/rss/news/{symbol}"
+        feed = feedparser.parse(url, request_headers=HEADERS)
+
+        for entry in feed.entries[:limit]:
+            title = entry.get("title", "").strip()
+            if not title:
+                continue
+            link = entry.get("link", "")
+            display_title = translate_uz(title) if translate else title
+            events.append({"title": display_title, "link": link, "publisher": "StockTitan"})
+    except Exception:
+        pass
+
+    return events
+
+
+def get_stocktitan_sec_filings(symbol, limit=8):
+    """StockTitan'ning rasmiy per-ticker SEC filings RSS feedidan oladi"""
+    try:
+        url = f"https://www.stocktitan.net/rss/sec-filings/{symbol}"
+        feed = feedparser.parse(url, request_headers=HEADERS)
+        if not feed.entries:
+            return None
+
+        lines = []
+        for entry in feed.entries[:limit]:
+            title = entry.get("title", "N/A")
+            published = entry.get("published", "")[:16]
+            lines.append(f"• {title} ({published})")
+
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
 def get_sec_filings_rss(symbol, limit=6):
     """Avval ticker->CIK xaritasidan CIK topib, keyin shu CIK bo'yicha rasmiy Atom feedni o'qiydi.
     Bu company nomi bo'yicha qidirishdan ancha ishonchli."""
@@ -238,6 +277,16 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finviz_data = get_finviz_data(symbol)
         flags, events = get_news_flags_and_events(stock, translate=True)
 
+        # StockTitan'dan qo'shimcha yangiliklar (ayniqsa kichik/penny stocklar uchun foydali)
+        stocktitan_events = get_stocktitan_news(symbol, limit=5, translate=True)
+
+        # StockTitan yangiliklarida ham xavf so'zlarini tekshiramiz
+        for e in stocktitan_events:
+            title_lower = e["title"].lower()
+            for key, keywords in RISK_KEYWORDS.items():
+                if any(kw in title_lower for kw in keywords):
+                    flags[key] = True
+
         def flag_icon(key):
             return "🔴 Bor" if flags[key] else "🟢 Yo'q"
 
@@ -259,19 +308,22 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             overall_risk = "🟢 Past"
 
-        if events:
+        def format_events(items, empty_text="• Ma'lumot topilmadi"):
+            if not items:
+                return empty_text
             lines = []
-            for e in events:
+            for e in items:
                 line = f"• {e['title']}"
                 if e.get("publisher"):
                     line += f" ({e['publisher']})"
                 if e.get("link"):
                     line += f"\n  🔗 {e['link']}"
                 lines.append(line)
-            events_text = "\n".join(lines)
-        else:
-            events_text = "• Ma'lumot topilmadi"
-        sec_filings_text = get_sec_filings_rss(symbol)
+            return "\n".join(lines)
+
+        stocktitan_text = format_events(stocktitan_events)
+        yahoo_text = format_events(events)
+        sec_filings_text = get_stocktitan_sec_filings(symbol) or get_sec_filings_rss(symbol)
 
         msg = f"""📊 {symbol}
 
@@ -299,8 +351,11 @@ async def ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👥 Employees: {info.get('fullTimeEmployees', 'N/A')}
 🏢 Exchange: {info.get('exchange', 'N/A')}
 
-📰 Oxirgi muhim voqealar:
-{events_text}
+📰 StockTitan yangiliklari:
+{stocktitan_text}
+
+📰 Boshqa yangiliklar (Yahoo Finance):
+{yahoo_text}
 
 📂 SEC Filings:
 {sec_filings_text}
